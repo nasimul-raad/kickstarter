@@ -1,62 +1,74 @@
 import os
 import pandas as pd
+from tqdm import tqdm  # <-- progress bar
 
-# Try to import tqdm; if not installed, define a no‐op fallback
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = lambda x, **kwargs: x
+# Set your root directory where the CSV files (and subfolders) are located
+root_dir    = '/Users/haquen/Desktop/Raw'
+output_base = os.path.join(root_dir, 'processed_batches')
 
-# 1. Configuration
-root_dir   = '/Users/haquen/Desktop/Raw'
-output_dir = os.path.join(root_dir, 'processed_all')
-os.makedirs(output_dir, exist_ok=True)
+# Create output directory if it doesn't exist
+os.makedirs(output_base, exist_ok=True)
 
-# 2. Discover all CSV files
+# 1) Discover all CSV files
 csv_files = []
-for dirpath, _, filenames in os.walk(root_dir):
+for dirpath, dirnames, filenames in os.walk(root_dir):
     for fname in filenames:
         if fname.lower().endswith('.csv'):
             csv_files.append(os.path.join(dirpath, fname))
-print(f"Found {len(csv_files)} CSV files.\n")
+print(f"Found {len(csv_files)} CSV files.")
 
-# 3. Determine common columns across every file (with progress bar)
+# 2) Identify common columns (show progress)
 column_sets = []
-for fpath in tqdm(csv_files, desc="Reading headers"):
+for file in tqdm(csv_files, desc="Reading CSV headers"):
     try:
-        cols = pd.read_csv(fpath, nrows=0).columns
-        column_sets.append(set(cols))
+        df = pd.read_csv(file, nrows=1)
+        column_sets.append(set(df.columns))
     except Exception as e:
-        print(f"  → Skipping header read of {fpath}: {e}")
+        tqdm.write(f"Skipping file {file}: {e}")
 
-if not column_sets:
-    raise RuntimeError("No CSV headers could be read.")
-common_columns = set.intersection(*column_sets)
-print(f"\nCommon columns: {common_columns}\n")
+if column_sets:
+    common_columns = set.intersection(*column_sets)
+    print(f"Common columns found across all CSVs: {common_columns}")
+else:
+    print("No valid CSV files found.")
+    common_columns = set()
 
-# 4. Load, filter on `state`, and collect (with progress bar)
-frames = []
-for fpath in tqdm(csv_files, desc="Loading & filtering"):
-    try:
-        df = pd.read_csv(fpath, usecols=common_columns)
-        if 'state' in df.columns:
-            df = df[df['state'].isin(['successful', 'failed'])]
-        else:
-            print(f"  ⚠️ 'state' not in {os.path.basename(fpath)} – no filter applied")
-        frames.append(df)
-    except Exception as e:
-        print(f"  → Skipping {fpath}: {e}")
+# 3) Process in batches of 500
+batch_size = 500
+num_batches = (len(csv_files) + batch_size - 1) // batch_size
 
-# 5. Concatenate and deduplicate
-if not frames:
-    raise RuntimeError("No dataframes to concatenate.")
-combined = pd.concat(frames, ignore_index=True)
-before = combined.shape[0]
-combined.drop_duplicates(inplace=True)
-after  = combined.shape[0]
-print(f"\nDeduplicated: {before - after} rows removed; final shape = {combined.shape}\n")
+for batch_idx in tqdm(range(num_batches), desc="Processing batches"):
+    start = batch_idx * batch_size
+    end   = start + batch_size
+    batch_files = csv_files[start:end]
+    batch_dfs   = []
 
-# 6. Write single output
-output_path = os.path.join(output_dir, 'combined_all.csv')
-combined.to_csv(output_path, index=False)
-print(f"All data saved to {output_path}")
+    for file in tqdm(batch_files,
+                     desc=f" Batch {batch_idx+1}/{num_batches}",
+                     leave=False):
+        try:
+            df = pd.read_csv(file, usecols=common_columns)
+            if 'state' in df:
+                df = df[df['state'].isin(['successful', 'failed'])]
+            else:
+                tqdm.write(f" Warning: no 'state' in {file}")
+            batch_dfs.append(df)
+        except Exception as e:
+            tqdm.write(f" Skipping {file}: {e}")
+
+    if batch_dfs:
+        batch_df = pd.concat(batch_dfs, ignore_index=True)
+        before = batch_df.shape[0]
+        batch_df.drop_duplicates(inplace=True)
+        after  = batch_df.shape[0]
+
+        print(f"Batch {batch_idx+1}: dropped {before-after} duplicates")
+
+        batch_folder = os.path.join(output_base, f'batch_{batch_idx+1:03}')
+        os.makedirs(batch_folder, exist_ok=True)
+        out_path = os.path.join(batch_folder, 'combined.csv')
+        batch_df.to_csv(out_path, index=False)
+
+        print(f" Saved batch {batch_idx+1} ({batch_df.shape}) to {out_path}")
+    else:
+        print(f"No data in batch {batch_idx+1}")
